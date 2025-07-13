@@ -41,46 +41,38 @@ def call_ollama_model(model_name, prompt):
         return f"Error: {e}"
 
 def parse_translation_output(output):
-    # Extracts Japanese translation from the model output
-    japanese = []
+    # Extract only Japanese sentences, remove commentary and non-Japanese explanations
     lines = output.splitlines()
-    in_japanese = False
-
+    jp_lines = []
     for line in lines:
         l = line.strip()
         if not l:
             continue
-        if re.search(r'(Japanese|日本語|translation into Japanese)', l, re.I):
-            in_japanese = True
+        # Remove lines that look like commentary, explanations, or start with '以下', 'こちら', etc.
+        if re.match(r'^(以下|こちら|注|和訳|翻訳|Here|Note|In English|\d+\.|[A-Za-z])', l):
             continue
-        if in_japanese:
-            # Collect only the actual translation
-            japanese.append(l)
-
-    return {
-        'japanese': '\n'.join(japanese).strip()
-    }
+        # Heuristic: Japanese sentences usually contain Hiragana/Katakana/Kanji
+        if re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', l):
+            jp_lines.append(l)
+    return {'japanese': ' '.join(jp_lines).strip()}
 
 def parse_backtranslation_output(output):
-    # Extracts English translation from the model output
-    english = []
+    # Remove commentary, explanations, and only keep main English sentences
     lines = output.splitlines()
-    in_english = False
-
+    en_lines = []
     for line in lines:
         l = line.strip()
         if not l:
             continue
-        if re.search(r'(English|translation into English)', l, re.I):
-            in_english = True
+        # Remove lines that look like commentary, explanations, or start with 'Here', 'Note', 'In English', etc.
+        if re.match(r'^(Here|Note|In English|\d+\.|[\u3040-\u30ff\u4e00-\u9fff])', l):
             continue
-        if in_english:
-            # Collect only the actual translation
-            english.append(l)
-
-    return {
-        'english': '\n'.join(english).strip()
-    }
+        # Heuristic: English sentences contain mostly ASCII and punctuation
+        if re.match(r'^[A-Za-z0-9 ,\.!?\'\"\-]+$', l):
+            # Remove leading/trailing quotes
+            l = l.strip('"\'')
+            en_lines.append(l)
+    return {'english': ' '.join(en_lines).strip()}
 
 
 def strip_note(text):
@@ -119,22 +111,16 @@ def run_translation(model_name, text, runs=14, delay=0):
         'back_english': ""
     }
 
+    # 1. Generate 14 translations as before
     for i in range(runs):
-        print(f"\nRun {i+1}:")
-        prompt = f"Translate this to Japanese:\n\n{text}"
-        print(f"[PROMPT to Ollama]: {prompt}")
-        jp = call_ollama_model(model_name, prompt)
+        jp = call_ollama_model(model_name, f"Translate all of the following English sentences to Japanese, preserving each sentence, as if you were speaking in a generally polite, but not overly formal, manner:\n\n{text}")
         parsed_jp = parse_translation_output(jp)
-
-        # Update prime translation fields
-        prime_translation['japanese'] = parsed_jp['japanese']
-
-        back_prompt = f"Translate this to English:\n\n{parsed_jp['japanese']}"
-        print(f"[PROMPT to Ollama]: {back_prompt}")
-        back_en = call_ollama_model(model_name, back_prompt)
+        back_en = call_ollama_model(model_name, f"Translate this to English:\n\n{parsed_jp['japanese']}")
         parsed_en = parse_backtranslation_output(back_en)
 
-        prime_translation['back_english'] = parsed_en['english']
+        print(f"RUN {i+1}:")
+        print(f"  {parsed_jp['japanese']}")
+        print(f"  {parsed_en['english'] if parsed_en['english'] else '[No English back-translation]'}\n")
 
         result = {
             'run': i+1,
@@ -144,6 +130,42 @@ def run_translation(model_name, text, runs=14, delay=0):
             'back_english': parsed_en['english']
         }
         all_results.append(result)
+
+    # 2. Compute semantic similarity between each back-translation and the input text
+    def semantic_similarity(a, b):
+        set_a = set(a.lower().split())
+        set_b = set(b.lower().split())
+        if not set_a or not set_b:
+            return 0
+        return len(set_a & set_b) / len(set_a | set_b)
+
+    scored = []
+    for r in all_results:
+        sim = semantic_similarity(text, r['back_english'])
+        scored.append((sim, r))
+    scored.sort(reverse=True, key=lambda x: x[0])
+    top_n = 3
+    top_japanese = []
+    top_back_english = []
+    for _, r in scored[:top_n]:
+        top_japanese.append(r['japanese'])
+        top_back_english.append(r['back_english'])
+
+    # 3. Fuse the top 3 Japanese translations using the LLM
+    fuse_prompt = """Fuse these Japanese sentences into one natural, fluent Japanese translation that preserves all the original meaning, is not overly formal, and is suitable for a general audience. Only output the Japanese translation, no commentary.\n\n"""
+    for idx, jp in enumerate(top_japanese):
+        fuse_prompt += f"{idx+1}. {jp}\n"
+    fused_japanese = call_ollama_model(model_name, fuse_prompt)
+    fused_japanese = parse_translation_output(fused_japanese)['japanese']
+
+    # Backtranslate the fused Japanese to English using the LLM
+    fused_back_en = call_ollama_model(model_name, f"Translate this to English. Only output the English translation, no commentary or explanation:\n\n{fused_japanese}")
+    fused_back_en = parse_backtranslation_output(fused_back_en)['english']
+
+    prime_translation['japanese'] = fused_japanese
+    prime_translation['back_english'] = fused_back_en
+    prime_translation['top_japanese'] = top_japanese
+    prime_translation['top_back_english'] = top_back_english
 
     # Update histogram after all runs
     translation_histogram = {
@@ -175,19 +197,16 @@ def run_translation(model_name, text, runs=14, delay=0):
                 jp_to_en_hist[jp] = {}
             jp_to_en_hist[jp][back_en] = jp_to_en_hist[jp].get(back_en, 0) + 1
 
-    # Save prime translation, all results, and histograms to JSON (no CSV)
-    if all_results:
-        with open('latest_translation.json', 'w', encoding='utf-8') as jf:
-            json.dump({
-                'prime_translation': prime_translation,
-                'all_runs': all_results,
-                'translation_histogram': translation_histogram,
-                'translation_occurrences': {
-                    'english_to_japanese': en_to_jp_hist,
-                    'japanese_to_english': jp_to_en_hist
-                }
-            }, jf, ensure_ascii=False, indent=2)
-        print("[INFO] Saved prime translation, all results, and histograms to latest_translation.json")
+    # Return all results for this model
+    return {
+        'prime_translation': prime_translation,
+        'all_runs': all_results,
+        'translation_histogram': translation_histogram,
+        'translation_occurrences': {
+            'english_to_japanese': en_to_jp_hist,
+            'japanese_to_english': jp_to_en_hist
+        }
+    }
 
 # CLI entry point
 def main():
@@ -273,18 +292,57 @@ if __name__ == "__main__":
     model = default_model if default_model in available_models else available_models[0]
     print(f"Using model: {model}")
 
+    def select_models_menu():
+        print("\nAvailable models:")
+        for idx, m in enumerate(available_models):
+            print(f"{idx+1}. {m}")
+        print("a. All models above")
+        print("0. Cancel")
+        sel = input("Select model(s) to test (comma-separated numbers, or 'a' for all): ")
+        if sel.strip().lower() == 'a':
+            return available_models
+        if sel.strip() == '0':
+            return []
+        try:
+            idxs = [int(x)-1 for x in sel.split(',') if x.strip().isdigit()]
+            return [available_models[i] for i in idxs if 0 <= i < len(available_models)]
+        except Exception:
+            print("Invalid selection.")
+            return []
+
     while True:
         choice = menu()
         if choice == "1":
             text = input("Enter text to translate: ")
-            run_translation(model, text, runs=14)
+            models_to_run = select_models_menu()
+            if not models_to_run:
+                continue
+            results = []
+            for m in models_to_run:
+                print(f"\n=== Running for model: {m} ===")
+                res = run_translation(m, text, runs=14)
+                results.append({'model': m, 'result': res})
+            with open('latest_translation.json', 'w', encoding='utf-8') as jf:
+                json.dump({'models': results}, jf, ensure_ascii=False, indent=2)
+            print("[INFO] Saved all model results to latest_translation.json")
         elif choice == "2":
             default_text = "I love programming. I am learning about AI and Python now. I enjoy cooking and exploring new cuisines."
             print(f"Using default text: {default_text}")
-            run_translation(model, default_text, runs=14)
+            models_to_run = select_models_menu()
+            if not models_to_run:
+                continue
+            results = []
+            for m in models_to_run:
+                print(f"\n=== Running for model: {m} ===")
+                res = run_translation(m, default_text, runs=14)
+                results.append({'model': m, 'result': res})
+            with open('latest_translation.json', 'w', encoding='utf-8') as jf:
+                json.dump({'models': results}, jf, ensure_ascii=False, indent=2)
+            print("[INFO] Saved all model results to latest_translation.json")
         elif choice == "3":
             file_path = input("Enter the path to the .txt file: ")
-            process_txt_file(file_path, model, runs=14)
+            print("[INFO] Multi-model batch for .txt not implemented yet.")
+            # You could implement similar logic for batch files if needed
         elif choice == "4":
             print("[INFO] CSV processing is not implemented yet.")
         elif choice == "5":
