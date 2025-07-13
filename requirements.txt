@@ -1,0 +1,4 @@
+requests
+numpy
+flask
+huggingface-hub>=0.21.0

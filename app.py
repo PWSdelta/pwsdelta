@@ -1,25 +1,111 @@
-from flask import Flask, render_template_string, send_from_directory
+from flask import Flask, request, jsonify, render_template_string
+import subprocess
 import json
 import os
+import threading
 
 app = Flask(__name__)
 
-@app.route('/')
-def index():
-    # Load the latest_translation.json file
+# --- Distributed Work Queue (in-memory for demo) ---
+work_queue = []
+work_results = {}
+work_id_counter = [1]
+work_lock = threading.Lock()
+
+def add_translation_jobs(text, model, runs=14):
+    with work_lock:
+        for run in range(1, runs+1):
+            work_id = work_id_counter[0]
+            work_id_counter[0] += 1
+            work_queue.append({'work_id': work_id, 'text': text, 'model': model, 'run': run})
+
+@app.route('/get-work', methods=['GET'])
+def get_work():
+    with work_lock:
+        if work_queue:
+            job = work_queue.pop(0)
+            return jsonify(job)
+        else:
+            return jsonify({'work_id': None})
+
+@app.route('/submit-translation', methods=['POST'])
+def submit_translation():
+    data = request.get_json(force=True)
+    work_id = data.get('work_id')
+    result = data.get('result')
+    if not work_id or not result:
+        return jsonify({'error': 'Missing work_id or result'}), 400
+    with work_lock:
+        work_results[work_id] = result
+    # Optionally, trigger more work or aggregation here
+    return jsonify({'status': 'ok'})
+
+@app.route('/start-distributed', methods=['POST'])
+def start_distributed():
+    data = request.get_json(force=True)
+    text = data.get('text', '').strip()
+    model = data.get('model', 'qwen2.5:7b-instruct')
+    runs = int(data.get('runs', 14))
+    if not text:
+        return jsonify({'error': 'No text provided.'}), 400
+    add_translation_jobs(text, model, runs)
+    return jsonify({'status': 'jobs added', 'jobs': runs})
+
+@app.route('/distributed-results', methods=['GET'])
+def distributed_results():
+    # Return all collected results so far
+    with work_lock:
+        results = list(work_results.values())
+    return jsonify({'results': results, 'count': len(results)})
+
+@app.route('/generate', methods=['POST'])
+def generate_translation():
+    data = request.get_json(force=True)
+    text = data.get('text', '').strip()
+    if not text:
+        return jsonify({'error': 'No text provided.'}), 400
+    try:
+        result = subprocess.run(
+            ['python', 'cli_gen_prime.py'],
+            input=f'1\n{text}\n0\n',
+            capture_output=True, text=True, timeout=600
+        )
+        json_path = os.path.join(os.path.dirname(__file__), 'latest_translation.json')
+        with open(json_path, 'r', encoding='utf-8') as f:
+            output = json.load(f)
+        return jsonify({'cli_stdout': result.stdout, 'cli_stderr': result.stderr, 'result': output})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/', methods=['GET', 'POST'])
+def view_results():
     json_path = os.path.join(os.path.dirname(__file__), 'latest_translation.json')
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-
-    # If multi-model format, use data['models'], else fallback to old format
     model_results = data.get('models')
     if not model_results:
-        # fallback: wrap old format for backward compatibility
         model_results = [{'model': data.get('prime_translation', {}).get('model', 'unknown'), 'result': data}]
-
-    # Bootstrap HTML template
-    # Register zip as a filter for Jinja2
     app.jinja_env.filters['zip'] = zip
+
+    # UI for style/tone selection and comparison
+    styles = [
+        'basic', 'polite', 'casual', 'formal', 'business', 'youthful', 'elderly', 'feminine', 'masculine', 'kansai', 'samurai', 'anime', 'robotic', 'poetic', 'concise', 'verbose'
+    ]
+    selected_style = request.form.get('style', 'basic')
+    selected_run = int(request.form.get('run', '1'))
+    # Find the first model's all_runs for demo
+    all_runs = model_results[0]['result'].get('all_runs', [])
+    base_jp = all_runs[selected_run-1]['japanese'] if all_runs and 1 <= selected_run <= len(all_runs) else ''
+    # Generate specialized translations for the selected style
+    specialized_jp = ''
+    diff = ''
+    if request.method == 'POST' and base_jp:
+        # Use the LLM to generate a specialized translation (simulate)
+        # In real use, call the backend or Ollama for this
+        specialized_jp = f"[{selected_style.capitalize()} style] {base_jp}"
+        # Compute a simple diff (for demo, just show both)
+        diff = f"<b>Base:</b> {base_jp}<br><b>{selected_style.capitalize()}:</b> {specialized_jp}"
+
     html = '''
     <!DOCTYPE html>
     <html lang="en">
@@ -41,6 +127,32 @@ def index():
     <body>
     <div class="container my-4">
         <h1 class="mb-4 text-center">Translation Results (Multi-Model)</h1>
+        <form method="post" class="mb-4">
+            <div class="row g-2 align-items-end">
+                <div class="col-auto">
+                    <label for="run" class="form-label">Select Run:</label>
+                    <select name="run" id="run" class="form-select">
+                        {% for run in range(1, all_runs|length+1) %}
+                        <option value="{{run}}" {% if run == selected_run %}selected{% endif %}>{{run}}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <label for="style" class="form-label">Select Style/Tone:</label>
+                    <select name="style" id="style" class="form-select">
+                        {% for s in styles %}
+                        <option value="{{s}}" {% if s == selected_style %}selected{% endif %}>{{s.capitalize()}}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <button type="submit" class="btn btn-success">Generate Specialized Translation</button>
+                </div>
+            </div>
+        </form>
+        {% if diff %}
+        <div class="alert alert-info">{{diff|safe}}</div>
+        {% endif %}
         <div class="row justify-content-center">
         {% for model_result in model_results %}
             {% set model = model_result.model %}
@@ -153,7 +265,7 @@ def index():
     </body>
     </html>
     '''
-    return render_template_string(html, model_results=model_results)
+    return render_template_string(html, model_results=model_results, styles=styles, selected_style=selected_style, selected_run=selected_run, all_runs=all_runs, diff=diff)
 
 if __name__ == '__main__':
     app.run(debug=True)
