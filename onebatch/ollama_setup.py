@@ -1,24 +1,18 @@
-
 # --- OLLAMA GENERATION (Qwen2.7:7b-Instruct) ---
 
 import subprocess
 import requests
 import json
 
-
-
-
-
-
 # Use Ollama for all tasks (generation, embedding, reranking)
 OLLAMA_MODEL = "qwen2.5:7b-instruct"
 
-def _ollama_generate(prompt, model=OLLAMA_MODEL, max_new_tokens=128):
+def _ollama_generate(prompt, model=OLLAMA_MODEL, max_new_tokens=128, temperature=0.7):
     url = "http://localhost:11434/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
-        "options": {"num_predict": max_new_tokens}
+        "options": {"num_predict": max_new_tokens, "temperature": temperature}
     }
     try:
         resp = requests.post(url, json=payload, timeout=120, stream=True)
@@ -43,7 +37,9 @@ def _ollama_generate(prompt, model=OLLAMA_MODEL, max_new_tokens=128):
 def load_qwen3_generation(model_name=None, force_cpu=False):
     model = model_name if model_name is not None else OLLAMA_MODEL
     print(f"[INFO] Using Ollama for generation: {model}. Make sure Ollama is running and model is pulled.")
-    return lambda prompt, max_new_tokens=128, **kwargs: _ollama_generate(prompt, model=model, max_new_tokens=max_new_tokens)
+    def generate(prompt, max_new_tokens=128, temperature=0.7, **kwargs):
+        return _ollama_generate(prompt, model=model, max_new_tokens=max_new_tokens, temperature=temperature)
+    return generate
 
 def load_qwen3_reranker(model_name=None, force_cpu=False):
     # Use Ollama for reranking: returns embeddings, use cosine similarity
@@ -91,5 +87,21 @@ def load_qwen3_embeddings(model_name=None, force_cpu=False):
                 results.append([0.0]*1024)
         return results
     return ollama_embed
+
+if __name__ == "__main__":
+    # Minimal embedding test for debugging
+    print("[TEST] Running minimal embedding test for reranker and embeddings...")
+    reranker = load_qwen3_reranker("qwen2.5:7b-instruct")
+    embedder = load_qwen3_embeddings("qwen2.5:7b-instruct")
+    test_texts = [
+        "This is a test sentence.",
+        "Another test sentence for embedding.",
+        "日本語のテスト文です。"
+    ]
+    print("[TEST] Reranker embeddings:")
+    print(reranker(test_texts))
+    print("[TEST] Embedding function:")
+    print(embedder(test_texts))
+    print("[TEST] If you see nonzero vectors above, embedding works. If all zeros, Ollama embedding is broken or model does not support embeddings.")
 
 

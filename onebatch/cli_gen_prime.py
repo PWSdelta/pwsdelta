@@ -6,14 +6,9 @@ import sys
 import re
 import json
 import csv
-from hf_models import load_qwen3_generation, load_qwen3_reranker, load_qwen3_embeddings
-
+from ollama_setup import load_qwen3_generation, load_qwen3_reranker, load_qwen3_embeddings
 import requests
-
-
 import os
-
-
 
 
 # Only use qwen2.5:7b-instruct for all tasks
@@ -172,7 +167,7 @@ def run_translation(model_name, text, runs=14, delay=0):
 
     # Top 3 and 4th-14th for fusion
     top3 = [r['japanese'] for _, r in scored[:3]]
-    fourth_to_14th = [r['japanese'] for _, r in scored[3:14]]
+    fourth_to_14th = [r['japanese'] for _, r in scored[1:14]]
 
     # LLM Fusion of top 3
     fuse_prompt_top3 = """Fuse these Japanese sentences into one natural, fluent Japanese translation that preserves all the original meaning, is not overly formal, and is suitable for a general audience. Only output the Japanese translation, no commentary.\n\n"""
@@ -295,9 +290,9 @@ if __name__ == "__main__":
                 print(f"[INFO] Running {model}...")
                 res = run_translation(model, text, runs=14)
                 results.append({'model': model, 'result': res})
-            with open('latest_translation.json', 'w', encoding='utf-8') as jf:
+            with open('onebatch/latest_translation.json', 'w', encoding='utf-8') as jf:
                 json.dump({'models': results}, jf, ensure_ascii=False, indent=2)
-            print("[INFO] Saved all model results to latest_translation.json")
+            print("[INFO] Saved all model results to onebatch/latest_translation.json")
         elif choice == "2":
             default_text = "I love programming. I am learning about AI and Python now. I enjoy cooking and exploring new cuisines."
             print(f"Using default text: {default_text}")
@@ -307,9 +302,9 @@ if __name__ == "__main__":
                 print(f"[INFO] Running {model}...")
                 res = run_translation(model, default_text, runs=14)
                 results.append({'model': model, 'result': res})
-            with open('latest_translation.json', 'w', encoding='utf-8') as jf:
+            with open('onebatch/latest_translation.json', 'w', encoding='utf-8') as jf:
                 json.dump({'models': results}, jf, ensure_ascii=False, indent=2)
-            print("[INFO] Saved all model results to latest_translation.json")
+            print("[INFO] Saved all model results to onebatch/latest_translation.json")
         elif choice == "3":
             file_path = input("Enter the path to the .txt file: ")
             print("[INFO] Multi-model batch for .txt not implemented yet.")

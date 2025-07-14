@@ -17,6 +17,9 @@ def get_work(server_url):
 
 def submit_translation(server_url, work_id, translation_result):
     try:
+        # Ensure work_id is included in the result dict for uniqueness
+        if isinstance(translation_result, dict):
+            translation_result['work_id'] = work_id
         resp = requests.post(f'{server_url}/submit-translation', json={
             'work_id': work_id,
             'result': translation_result
